@@ -1,0 +1,6 @@
+# backups gerados ao configurar o Windows Terminal
+*.clipbridge-bak-*
+*.bak-*
+
+# logs de diagnóstico
+clip-bridge.log

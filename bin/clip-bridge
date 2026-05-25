@@ -1,0 +1,87 @@
+#!/usr/bin/env bash
+# clip-bridge — traz a área de transferência do Windows para ferramentas Linux
+# (xclip / wl-paste) rodando no WSL.
+#
+# Apps como o Claude Code leem imagens do clipboard chamando `xclip` ou
+# `wl-paste`. No WSL o Windows entrega imagens em BMP — que essas ferramentas
+# normalmente nem existem para fornecer, e que o Claude Code não aceita. Este
+# script se disfarça das duas (via symlinks) e usa o PowerShell para ler a
+# imagem do clipboard do Windows e devolvê-la convertida em PNG na hora.
+#
+# Instalado como symlinks: <bindir>/wl-paste e <bindir>/xclip -> clip-bridge
+#
+# https://github.com/Furiatii/wsl-clip-bridge
+
+# --- localiza o PowerShell no lado Windows ---
+find_ps() {
+  local c p
+  for c in powershell.exe pwsh.exe; do
+    command -v "$c" >/dev/null 2>&1 && { printf '%s' "$c"; return 0; }
+  done
+  for p in \
+    "/mnt/c/Windows/System32/WindowsPowerShell/v1.0/powershell.exe" \
+    "/mnt/c/Program Files/PowerShell/7/pwsh.exe"; do
+    [ -x "$p" ] && { printf '%s' "$p"; return 0; }
+  done
+  return 1
+}
+
+PS="$(find_ps)" || { echo "clip-bridge: PowerShell não encontrado (powershell.exe/pwsh.exe)" >&2; exit 1; }
+
+# powershell.exe (Windows PowerShell 5.1) precisa de -sta para acessar o clipboard.
+sta=""
+case "$PS" in *powershell.exe) sta="-sta";; esac
+
+# Roda um comando PowerShell sem inferno de aspas (UTF-16LE + base64 -> -EncodedCommand).
+psrun() {
+  local enc
+  enc=$(printf '%s' "$1" | iconv -t UTF-16LE | base64 -w0)
+  if [ -n "$sta" ]; then
+    "$PS" "$sta" -NoProfile -NonInteractive -EncodedCommand "$enc" 2>/dev/null | tr -d '\r'
+  else
+    "$PS" -NoProfile -NonInteractive -EncodedCommand "$enc" 2>/dev/null | tr -d '\r'
+  fi
+}
+
+# --- parse de argumentos (entende estilo wl-paste e xclip) ---
+list=0
+type=""
+prev=""
+for a in "$@"; do
+  case "$a" in
+    -l|--list-types) list=1 ;;
+    -t|--type)       prev="type" ;;
+    --type=*)        type="${a#--type=}" ;;
+    -t*)             type="${a#-t}" ;;
+    *)
+      if [ "$prev" = "type" ]; then type="$a"; prev=""; fi
+      ;;
+  esac
+done
+
+# xclip pede a lista de formatos com `-t TARGETS -o`
+[ "$type" = "TARGETS" ] && list=1
+
+PS_LIST='Add-Type -AssemblyName System.Windows.Forms; $o=@("TARGETS"); if([System.Windows.Forms.Clipboard]::ContainsImage()){$o+="image/png"}; if([System.Windows.Forms.Clipboard]::ContainsText()){$o+="text/plain"; $o+="text/plain;charset=utf-8"; $o+="UTF8_STRING"}; [Console]::Out.Write(($o -join [char]10))'
+
+PS_IMG='Add-Type -AssemblyName System.Windows.Forms; Add-Type -AssemblyName System.Drawing; if([System.Windows.Forms.Clipboard]::ContainsImage()){$i=[System.Windows.Forms.Clipboard]::GetImage(); $p=Join-Path $env:TEMP "clip-bridge.png"; $i.Save($p,[System.Drawing.Imaging.ImageFormat]::Png); [Console]::Out.Write($p)}'
+
+PS_TXT='Add-Type -AssemblyName System.Windows.Forms; if([System.Windows.Forms.Clipboard]::ContainsText()){[Console]::Out.Write([System.Windows.Forms.Clipboard]::GetText())}'
+
+if [ "$list" = 1 ]; then
+  psrun "$PS_LIST"
+  exit 0
+fi
+
+case "$type" in
+  image/*)
+    winpath=$(psrun "$PS_IMG")
+    [ -n "$winpath" ] || exit 1
+    lin=$(wslpath -u "$winpath" 2>/dev/null) || exit 1
+    [ -f "$lin" ] || exit 1
+    cat "$lin"
+    ;;
+  *)
+    psrun "$PS_TXT"
+    ;;
+esac
